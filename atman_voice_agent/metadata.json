@@ -1,0 +1,7 @@
+{
+  "name": "ATMAN Cloud Consultants",
+  "description": "Professional voice-based lead qualification agent for ATMAN Cloud Consultants using Gemini Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

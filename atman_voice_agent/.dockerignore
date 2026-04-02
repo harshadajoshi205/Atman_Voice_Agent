@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+.env
+.env.*
+*.db
+*.log
+.git
+.gitignore
+.DS_Store
+live_models.txt
+live_model_detail.txt
+README.md
