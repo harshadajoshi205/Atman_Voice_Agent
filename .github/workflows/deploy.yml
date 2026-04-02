@@ -26,16 +26,16 @@ jobs:
 
       - name: Build Docker Image
         run: |
-          docker build -t asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }} ./atman_voice_agent
+          docker build -t asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }} ./atman_voice_agent
 
       - name: Push Docker Image
         run: |
-          docker push asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }}
+          docker push asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }}
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy my-app \
-            --image asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }} \
+            --image asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }} \
             --region asia-south1 \
             --platform managed \
             --allow-unauthenticated
