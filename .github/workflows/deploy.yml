@@ -1,0 +1,41 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev
+
+      - name: Build Docker Image
+        run: |
+          docker build -t asia-south1-docker.pkg.dev/$PROJECT_ID/voice-agent-repo/atman-voice-agent:${{ github.sha }} ./atman_voice_agent
+
+      - name: Push Docker Image
+        run: |
+          docker push asia-south1-docker.pkg.dev/$PROJECT_ID/voice-agent-repo/atman-voice-agent:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy YOUR_SERVICE_NAME \
+            --image asia-south1-docker.pkg.dev/$PROJECT_ID/voice-agent-repo/atman-voice-agent:${{ github.sha }} \
+            --region asia-south1 \
+            --platform managed \
+            --allow-unauthenticated
