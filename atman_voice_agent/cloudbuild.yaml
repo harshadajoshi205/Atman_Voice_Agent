@@ -4,7 +4,7 @@ steps:
       [
         'build',
         '-t',
-        'asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA',
+        'asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA',
         '.'
       ]
 
@@ -12,7 +12,7 @@ steps:
     args:
       [
         'push',
-        'asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA'
+        'asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA'
       ]
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -23,7 +23,7 @@ steps:
         'deploy',
         'my-app',
         '--image',
-        'asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA',
+        'asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA',
         '--region',
         'asia-south1',
         '--platform',
