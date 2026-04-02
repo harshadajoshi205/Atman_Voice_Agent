@@ -21,7 +21,7 @@ steps:
       [
         'run',
         'deploy',
-        'YOUR_SERVICE_NAME',
+        'my-app',
         '--image',
         'asia-south1-docker.pkg.dev/$voice-agent-489216/voice-agent-repo/atman-voice-agent:$COMMIT_SHA',
         '--region',
