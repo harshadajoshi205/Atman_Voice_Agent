@@ -38,5 +38,5 @@ jobs:
             --image asia-south1-docker.pkg.dev/voice-agent-489216/voice-agent-repo/atman-voice-agent:${{ github.sha }} \
             --region asia-south1 \
             --platform managed \
-            --allow-unauthenticated
+            --allow-unauthenticated\
             --set-env-vars GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
