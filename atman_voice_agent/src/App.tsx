@@ -19,7 +19,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'agent' | 'dashboard'>('agent');
   const [error, setError] = useState<string | null>(null);
 
-  // Dashboard data
   const [logs, setLogs] = useState([]);
   const [leads, setLeads] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -29,12 +28,19 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const transcriptRef = useRef<{ role: 'user' | 'model', text: string }[]>([]);
-  const isStoppingRef = useRef(false); // Prevent double-stop loop
+  const isStoppingRef = useRef(false);
 
-  // Keep transcriptRef in sync with state for backend processing
+  const statusRef = useRef<'idle' | 'listening' | 'speaking'>('idle');
+  const interruptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastInterruptAtRef = useRef(0);
+
   useEffect(() => {
     transcriptRef.current = transcript;
   }, [transcript]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -64,7 +70,7 @@ export default function App() {
       clearTimeout(silenceTimeoutRef.current);
       silenceTimeoutRef.current = null;
     }
-    // Only set a new timeout if session is active
+
     if (sessionRef.current) {
       silenceTimeoutRef.current = setTimeout(() => {
         console.log("Silence timeout reached, stopping session.");
@@ -73,16 +79,37 @@ export default function App() {
     }
   }, []);
 
+  const clearInterruptTimer = () => {
+    if (interruptTimeoutRef.current) {
+      clearTimeout(interruptTimeoutRef.current);
+      interruptTimeoutRef.current = null;
+    }
+  };
+
+  const interruptAiPlayback = () => {
+    const now = Date.now();
+    if (now - lastInterruptAtRef.current < 600) return;
+
+    lastInterruptAtRef.current = now;
+    console.log("Interrupting AI playback");
+    audioStreamerRef.current?.interruptPlayback();
+    setStatus('listening');
+    statusRef.current = 'listening';
+    resetSilenceTimeout();
+  };
+
   const stopSession = useCallback(async () => {
-    // Prevent re-entrant calls (onclose -> stopSession -> close -> onclose loop)
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
+
+    clearInterruptTimer();
 
     if (silenceTimeoutRef.current) {
       clearTimeout(silenceTimeoutRef.current);
       silenceTimeoutRef.current = null;
     }
 
+    audioStreamerRef.current?.interruptPlayback();
     audioStreamerRef.current?.stop();
 
     try {
@@ -92,7 +119,6 @@ export default function App() {
     }
     sessionRef.current = null;
 
-    // Process transcript if it exists
     if (transcriptRef.current.length > 0) {
       processCallTranscript(transcriptRef.current);
     }
@@ -100,8 +126,8 @@ export default function App() {
     setIsConnected(false);
     setIsConnecting(false);
     setStatus('idle');
+    statusRef.current = 'idle';
 
-    // Allow future stop calls after a short delay
     setTimeout(() => {
       isStoppingRef.current = false;
     }, 500);
@@ -112,6 +138,7 @@ export default function App() {
     setError(null);
     setTranscript([]);
     isStoppingRef.current = false;
+    clearInterruptTimer();
 
     try {
       const apiKey = (process.env as any).GEMINI_API_KEY;
@@ -121,7 +148,8 @@ export default function App() {
 
       const ai = new GoogleGenAI({ apiKey });
 
-      // Create audio streamer first but don't start mic yet
+      // IMPORTANT:
+      // Do not interrupt here. This callback fires for every audio chunk.
       audioStreamerRef.current = new AudioStreamer((base64Data) => {
         if (sessionRef.current) {
           try {
@@ -133,16 +161,30 @@ export default function App() {
           }
         }
       });
-      audioStreamerRef.current.setVolumeCallback((v) => setVolume(v));
 
-      // Start microphone BEFORE connecting to avoid AudioContext race condition
+      audioStreamerRef.current.setVolumeCallback((v) => {
+        setVolume(v);
+
+        // Trigger barge-in only on sustained speech while AI is speaking
+        if (statusRef.current === 'speaking' && v > 0.22) {
+          if (!interruptTimeoutRef.current) {
+            interruptTimeoutRef.current = setTimeout(() => {
+              interruptAiPlayback();
+              clearInterruptTimer();
+            }, 180);
+          }
+        } else {
+          clearInterruptTimer();
+        }
+      });
+
       console.log("Starting microphone...");
       await audioStreamerRef.current.start();
       console.log("Microphone started successfully.");
 
       console.log("Connecting to Gemini Live API...");
       const session = await ai.live.connect({
-        model: "gemini-2.5-flash-preview-native-audio-dialog",
+        model: "gemini-3.1-flash-live-preview",
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -156,12 +198,13 @@ export default function App() {
             setIsConnected(true);
             setIsConnecting(false);
             setStatus('listening');
+            statusRef.current = 'listening';
             resetSilenceTimeout();
           },
+
           onmessage: async (message: LiveServerMessage) => {
             const msg = message as any;
 
-            // 1. Tool Calls
             if (msg.toolCall) {
               const call = msg.toolCall.functionCalls?.find((f: any) => f.name === "hangUp");
               if (call) {
@@ -170,23 +213,23 @@ export default function App() {
               }
             }
 
-            // 2. Audio Output
             const modelParts = msg.serverContent?.modelTurn?.parts || [];
             for (const part of modelParts) {
               if (part.inlineData?.data) {
                 setStatus('speaking');
+                statusRef.current = 'speaking';
                 audioStreamerRef.current?.playAudioChunk(part.inlineData.data);
                 resetSilenceTimeout();
               }
             }
 
-            // 3. Interruption
             if (msg.serverContent?.interrupted) {
+              audioStreamerRef.current?.interruptPlayback();
               setStatus('listening');
+              statusRef.current = 'listening';
               resetSilenceTimeout();
             }
 
-            // 4. User Transcription
             if (msg.inputAudioTranscription) {
               const userText = msg.inputAudioTranscription.transcription;
               if (userText) {
@@ -199,14 +242,15 @@ export default function App() {
                   }
                   return [...prev, { role: 'user', text: userText }];
                 });
+
                 if (msg.inputAudioTranscription.done) {
                   setStatus('listening');
+                  statusRef.current = 'listening';
                   resetSilenceTimeout();
                 }
               }
             }
 
-            // 5. Model Transcription
             let modelText = modelParts
               .filter((p: any) => p.text && !p.thought)
               .map((p: any) => p.text)
@@ -230,12 +274,14 @@ export default function App() {
               });
             }
           },
+
           onclose: (e: any) => {
             console.log("Gemini Live API connection closed", e?.code, e?.reason);
             if (!isStoppingRef.current) {
               stopSession();
             }
           },
+
           onerror: (err: any) => {
             console.error("Live API Error:", err);
             setError(err?.message || String(err) || "Connection error occurred");
@@ -248,14 +294,14 @@ export default function App() {
 
       sessionRef.current = session;
       console.log("Session established, waiting for audio...");
-
     } catch (error) {
       console.error("Failed to start session:", error);
-      // Stop the microphone if connection failed
+      audioStreamerRef.current?.interruptPlayback();
       audioStreamerRef.current?.stop();
       setError(error instanceof Error ? error.message : "An unexpected error occurred");
       setIsConnecting(false);
       isStoppingRef.current = false;
+      clearInterruptTimer();
     }
   };
 
@@ -280,13 +326,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col items-center p-4 md:p-8 relative overflow-x-hidden bg-[#050505]">
-      {/* Background Orbs */}
       <div className="orb-glow w-[500px] h-[500px] bg-purple-600/20 top-[-10%] left-[-10%]" />
       <div className="orb-glow w-[400px] h-[400px] bg-pink-600/20 bottom-[-10%] right-[-10%]" />
       <div className="orb-glow w-[300px] h-[300px] bg-cyan-600/20 top-[20%] right-[10%]" />
 
       <div className="w-full max-w-6xl flex flex-col gap-8 z-10">
-        {/* Header */}
         <header className="flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="space-y-1 text-center md:text-left">
             <motion.div
@@ -331,7 +375,6 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start"
             >
-              {/* Voice Interaction Area */}
               <div className="lg:col-span-7 glass-card p-10 flex flex-col items-center justify-center gap-10 min-h-[500px]">
                 <div className="relative flex items-center justify-center">
                   <AnimatePresence>
@@ -438,7 +481,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Transcript Area */}
               <div className="lg:col-span-5 flex flex-col gap-4">
                 <div className="glass-card overflow-hidden flex flex-col h-[500px]">
                   <div className="p-4 border-b border-white/10 bg-white/5 flex items-center justify-between">

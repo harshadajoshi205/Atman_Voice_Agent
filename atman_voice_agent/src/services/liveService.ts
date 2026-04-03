@@ -11,6 +11,8 @@ export class AudioStreamer {
   private sampleRate: number = 16000;
   private onVolumeChange?: (volume: number) => void;
 
+  // Added for interruption / barge-in support
+  private currentSources: AudioBufferSourceNode[] = [];
 
   constructor(private onAudioData: (base64Data: string) => void) {}
 
@@ -22,19 +24,19 @@ export class AudioStreamer {
     // Create separate contexts for input (16kHz) and playback (24kHz)
     this.inputContext = new AudioContext({ sampleRate: this.sampleRate });
     this.playbackContext = new AudioContext({ sampleRate: 24000 });
-    
+
     // Resume contexts in case they're suspended (browser autoplay policy)
     if (this.inputContext.state === 'suspended') await this.inputContext.resume();
     if (this.playbackContext.state === 'suspended') await this.playbackContext.resume();
-    
+
     this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     this.source = this.inputContext.createMediaStreamSource(this.mediaStream);
-    
+
     this.analyser = this.inputContext.createAnalyser();
     this.analyser.fftSize = 256;
-    
+
     this.processor = this.inputContext.createScriptProcessor(4096, 1, 1);
-    
+
     this.processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
       const pcmData = this.floatTo16BitPCM(inputData);
@@ -44,7 +46,7 @@ export class AudioStreamer {
       if (this.analyser && this.onVolumeChange) {
         const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
         this.analyser.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
         this.onVolumeChange(average / 255);
       }
     };
@@ -58,13 +60,16 @@ export class AudioStreamer {
     try { this.source?.disconnect(); } catch (e) {}
     try { this.processor?.disconnect(); } catch (e) {}
     try { this.analyser?.disconnect(); } catch (e) {}
-    
+
+    // Stop any currently playing AI audio
+    this.interruptPlayback();
+
     // Stop all mic tracks
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach(track => track.stop());
       this.mediaStream = null;
     }
-    
+
     if (this.inputContext && this.inputContext.state !== 'closed') {
       this.inputContext.close();
     }
@@ -78,11 +83,11 @@ export class AudioStreamer {
 
   playAudioChunk(base64Data: string) {
     if (!this.playbackContext || this.playbackContext.state === 'closed') return;
-    
+
     const arrayBuffer = this.base64ToArrayBuffer(base64Data);
     const pcmData = new Int16Array(arrayBuffer);
     const floatData = new Float32Array(pcmData.length);
-    
+
     for (let i = 0; i < pcmData.length; i++) {
       floatData[i] = pcmData[i] / 32768.0;
     }
@@ -94,9 +99,28 @@ export class AudioStreamer {
     source.buffer = buffer;
     source.connect(this.playbackContext.destination);
 
+    this.currentSources.push(source);
+
+    source.onended = () => {
+      this.currentSources = this.currentSources.filter((s) => s !== source);
+    };
+
     const startTime = Math.max(this.playbackContext.currentTime, this.nextStartTime);
     source.start(startTime);
     this.nextStartTime = startTime + buffer.duration;
+  }
+
+  // Added for barge-in: immediately stop queued/current AI speech
+  interruptPlayback() {
+    try {
+      this.currentSources.forEach((source) => {
+        try { source.stop(); } catch (e) {}
+      });
+      this.currentSources = [];
+      this.nextStartTime = 0;
+    } catch (e) {
+      console.warn("Error interrupting playback:", e);
+    }
   }
 
   private floatTo16BitPCM(float32Array: Float32Array): ArrayBuffer {

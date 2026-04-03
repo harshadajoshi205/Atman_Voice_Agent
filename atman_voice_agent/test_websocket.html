@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent WebSocket Tester</title>
+    <!-- Import Google GenAI using a module block -->
+    <script type="importmap">
+        {
+          "imports": {
+            "@google/genai": "https://esm.run/@google/genai"
+          }
+        }
+    </script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f4f4f9; }
+        .panel { background: white; border: 1px solid #ccc; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .input-group { margin-bottom: 15px; display: flex; flex-direction: column; gap: 5px; }
+        input[type="password"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; background-color: #6a1b9a; color: white; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #4a148c; }
+        button.danger { background-color: #dc3545; }
+        button.danger:hover { background-color: #a71d2a; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #log { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; border-radius: 4px; background-color: #1e1e1e; color: #00ff00; font-family: monospace; }
+        .log-sys { color: #aaa; }
+        .log-err { color: #ff5555; }
+        .log-ai { color: #00ffff; }
+        .log-user { color: #ff00ff; }
+        .status-badge { display: inline-block; padding: 5px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; background: #eee; color: #666; margin-left: 10px; }
+        .status-connected { background: #d4edda; color: #155724; }
+    </style>
+</head>
+<body>
+
+    <h2>Voice Agent Tester (Client-Side)</h2>
+    <p>This page connects directly to the Gemini Live API via WebAudio and native WebSockets. Your backend codebase is bypassed completely.</p>
+    
+    <div class="panel">
+        <div class="input-group">
+            <label for="apiKey"><strong>Gemini API Key:</strong></label>
+            <input type="password" id="apiKey" placeholder="AIzaSy...">
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <button id="btnConnect">Start Voice Agent</button>
+            <button id="btnDisconnect" class="danger" disabled>Stop Agent</button>
+            <span id="wsStatus" class="status-badge">Idle</span>
+        </div>
+    </div>
+
+    <div class="panel">
+        <strong>Live Transcript & Logs:</strong>
+        <div id="log" style="margin-top: 10px;"></div>
+    </div>
+
+    <script type="module">
+        // UI Elements
+        const apiKeyInput = document.getElementById('apiKey');
+        const btnConnect = document.getElementById('btnConnect');
+        const btnDisconnect = document.getElementById('btnDisconnect');
+        const wsStatus = document.getElementById('wsStatus');
+        const logPanel = document.getElementById('log');
+
+        // State & Audio Objects
+        let ws = null;
+        let inputContext = null;
+        let playbackContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let source = null;
+        let nextStartTime = 0;
+        let currentSources = [];
+
+        function appendLog(message, type = 'sys') {
+            const div = document.createElement('div');
+            div.className = `log-${type}`;
+            const time = new Date().toLocaleTimeString();
+            div.textContent = `[${time}] ${message}`;
+            logPanel.appendChild(div);
+            logPanel.scrollTop = logPanel.scrollHeight;
+        }
+
+        function updateUI(connected) {
+            btnConnect.disabled = connected;
+            apiKeyInput.disabled = connected;
+            btnDisconnect.disabled = !connected;
+            
+            if (connected) {
+                wsStatus.textContent = 'Listening...';
+                wsStatus.className = 'status-badge status-connected';
+            } else {
+                wsStatus.textContent = 'Idle';
+                wsStatus.className = 'status-badge';
+            }
+        }
+
+        // --- Audio Capture & Playback Logic (Extracted from liveService.ts) ---
+
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        function playAudioChunk(base64Data) {
+            if (!playbackContext || playbackContext.state === 'closed') return;
+            const arrayBuffer = base64ToArrayBuffer(base64Data);
+            const pcmData = new Int16Array(arrayBuffer);
+            const floatData = new Float32Array(pcmData.length);
+            for (let i = 0; i < pcmData.length; i++) floatData[i] = pcmData[i] / 32768.0;
+
+            const buffer = playbackContext.createBuffer(1, floatData.length, 24000);
+            buffer.getChannelData(0).set(floatData);
+
+            const src = playbackContext.createBufferSource();
+            src.buffer = buffer;
+            src.connect(playbackContext.destination);
+            currentSources.push(src);
+
+            src.onended = () => {
+                currentSources = currentSources.filter(s => s !== src);
+            };
+
+            const startTime = Math.max(playbackContext.currentTime, nextStartTime);
+            src.start(startTime);
+            nextStartTime = startTime + buffer.duration;
+        }
+
+        function interruptPlayback() {
+            try {
+                currentSources.forEach(s => { try { s.stop(); } catch(e){} });
+                currentSources = [];
+                nextStartTime = 0;
+            } catch (e) {}
+        }
+
+        async function startMicAndConnect(apiKey) {
+            appendLog('Requesting microphone access...', 'sys');
+            try {
+                // Initialize contexts
+                inputContext = new AudioContext({ sampleRate: 16000 });
+                playbackContext = new AudioContext({ sampleRate: 24000 });
+
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                source = inputContext.createMediaStreamSource(mediaStream);
+                
+                processor = inputContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = (e) => {
+                    if (!ws) return;
+                    
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // Float32 to Int16 PCM
+                    const buffer = new ArrayBuffer(inputData.length * 2);
+                    const view = new DataView(buffer);
+                    for (let i = 0; i < inputData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                    }
+                    
+                    // ArrayBuffer to Base64
+                    let binary = "";
+                    const bytes = new Uint8Array(buffer);
+                    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+                    const base64Data = btoa(binary);
+
+                    // Send to Gemini
+                    try {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                realtimeInput: {
+                                    mediaChunks: [{
+                                        mimeType: 'audio/pcm;rate=16000',
+                                        data: base64Data
+                                    }]
+                                }
+                            }));
+                        }
+                    } catch (err) {}
+                };
+
+                source.connect(processor);
+                processor.connect(inputContext.destination);
+
+                appendLog('Microphone active. Connecting to Gemini API...', 'sys');
+
+                // Establish native WebSocket connection to Gemini Live API
+                const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+                ws = new WebSocket(url);
+                
+                ws.onopen = () => {
+                    appendLog('WebSocket Connected to Gemini!', 'sys');
+                    updateUI(true);
+                    
+                    // Send standard setup message
+                    ws.send(JSON.stringify({
+                        setup: {
+                            model: "models/gemini-3.1-flash-live-preview",
+                            generationConfig: {
+                                responseModalities: ["AUDIO"],
+                                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } } }
+                            },
+                            systemInstruction: {
+                                parts: [{ text: SYSTEM_INSTRUCTION }]
+                            }
+                        }
+                    }));
+                };
+                
+                ws.onmessage = (event) => {
+                    let msg;
+                    try {
+                        msg = JSON.parse(event.data);
+                    } catch (err) {
+                        return;
+                    }
+                    
+                    // Handle Interruption
+                    if (msg.serverContent && msg.serverContent.interrupted) {
+                        interruptPlayback();
+                    }
+
+                    // Handle Audio Output and Transcript Fragments
+                    if (msg.serverContent && msg.serverContent.modelTurn) {
+                        const modelParts = msg.serverContent.modelTurn.parts || [];
+                        let textOutputs = "";
+                        
+                        modelParts.forEach((part) => {
+                            if (part.inlineData && part.inlineData.data) {
+                                playAudioChunk(part.inlineData.data);
+                            }
+                            if (part.text) {
+                                textOutputs += part.text;
+                            }
+                        });
+                        
+                        if (textOutputs) {
+                            appendLog(`AI: ${textOutputs}`, 'ai');
+                        }
+                    }
+                };
+
+                ws.onclose = (event) => {
+                    appendLog('Gemini Connection Closed.', 'err');
+                    stopEverything();
+                };
+
+                ws.onerror = (error) => {
+                    appendLog(`Live API Error occurred.`, 'err');
+                    stopEverything();
+                };
+
+            } catch(e) {
+                appendLog(`Failed: ${e.message}`, 'err');
+                stopEverything();
+            }
+        }
+
+        function stopEverything() {
+            interruptPlayback();
+            try { source && source.disconnect(); } catch(e){}
+            try { processor && processor.disconnect(); } catch(e){}
+            if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+            if (inputContext && inputContext.state !== 'closed') inputContext.close();
+            if (playbackContext && playbackContext.state !== 'closed') playbackContext.close();
+            
+            try { if (ws) ws.close(); } catch(e){}
+            
+            ws = null;
+            source = null;
+            processor = null;
+            mediaStream = null;
+            updateUI(false);
+            appendLog('Session terminated.', 'sys');
+        }
+
+        btnConnect.addEventListener('click', () => {
+            const key = apiKeyInput.value.trim();
+            if (!key) {
+                alert("Please enter a Gemini API Key!");
+                return;
+            }
+            startMicAndConnect(key);
+        });
+
+        btnDisconnect.addEventListener('click', stopEverything);
+
+    </script>
+</body>
+</html>

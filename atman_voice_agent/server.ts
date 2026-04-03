@@ -193,7 +193,7 @@ async function extractLeadInfo(transcript: string) {
 
   try {
     const result = await genAI.models.generateContent({
-      model: "gemini-2.5-flash-preview-native-audio-dialog",
+      model: "gemini-3.1-flash-live-preview",
       contents: [{ parts: [{ text: prompt }] }],
     });
     const text = result.text;
